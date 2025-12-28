@@ -89,6 +89,14 @@ func cleanDirectoryName(dir string) string {
 	// Trim underscores from start and end
 	dir = strings.Trim(dir, "_")
 
+	// Skip meaningless directory names that are just remnants
+	meaningless := []string{"and_before", "and_after", "and", "before", "after"}
+	for _, skip := range meaningless {
+		if strings.ToLower(dir) == skip {
+			return ""
+		}
+	}
+
 	return dir
 }
 
