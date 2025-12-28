@@ -113,6 +113,51 @@ func (c *SSHClient) DownloadFile(remotePath, localPath string) error {
 	return localFile.Sync()
 }
 
+// UploadFile uploads a local file to remote using cat over SSH
+func (c *SSHClient) UploadFile(localPath, remotePath string) error {
+	// Open local file
+	localFile, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local file: %w", err)
+	}
+	defer localFile.Close()
+
+	// Use cat to write file contents
+	cmd := fmt.Sprintf("cat > %s", shellescape(remotePath))
+
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	// Stream local file to remote
+	session.Stdin = localFile
+
+	if err := session.Run(cmd); err != nil {
+		return fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	return nil
+}
+
+// CreateDirectory creates a directory on the remote server
+func (c *SSHClient) CreateDirectory(remotePath string) error {
+	cmd := fmt.Sprintf("mkdir -p %s", shellescape(remotePath))
+
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	if err := session.Run(cmd); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	return nil
+}
+
 // parseUsername extracts username from host string
 func parseUsername(host string) string {
 	if strings.Contains(host, "@") {

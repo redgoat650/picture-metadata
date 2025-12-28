@@ -12,7 +12,9 @@ func main() {
 	sourceDir := flag.String("source", "", "Source directory containing photos (can be remote SSH path like user@host:path)")
 	destDir := flag.String("dest", "", "Destination directory for reorganized photos")
 	dryRun := flag.Bool("dry-run", false, "Perform a dry run without making changes")
-	sshHost := flag.String("ssh-host", "", "SSH host (e.g., nas-photos or user@host:port)")
+	sshHost := flag.String("ssh-host", "", "SSH host for source (e.g., nas-photos or user@host:port)")
+	destSSHHost := flag.String("dest-ssh-host", "", "SSH host for destination (defaults to same as source)")
+	remoteDest := flag.Bool("remote-dest", false, "Whether destination is on remote server (requires -dest-ssh-host or -ssh-host)")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 
 	flag.Parse()
@@ -23,12 +25,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// If dest-ssh-host not specified but remote-dest is true, use same as source
+	if *remoteDest && *destSSHHost == "" {
+		*destSSHHost = *sshHost
+	}
+
 	config := &Config{
-		SourceDir: *sourceDir,
-		DestDir:   *destDir,
-		DryRun:    *dryRun,
-		SSHHost:   *sshHost,
-		Verbose:   *verbose,
+		SourceDir:   *sourceDir,
+		DestDir:     *destDir,
+		DryRun:      *dryRun,
+		SSHHost:     *sshHost,
+		DestSSHHost: *destSSHHost,
+		RemoteDest:  *remoteDest,
+		Verbose:     *verbose,
 	}
 
 	if err := run(config); err != nil {

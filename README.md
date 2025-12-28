@@ -8,7 +8,8 @@ A Go-based tool for reorganizing and standardizing photo collections with automa
 - **Standardized Organization**: Reorganizes photos into `YYYY/YYYY-MM/` directory structure
 - **Filename Standardization**: Renames files to `YYYY-MM-DD_HHMMSS_description.ext` format
 - **EXIF Metadata Updates**: Updates photo metadata (DateTimeOriginal, CreateDate) to match filename dates
-- **SSH/SFTP Support**: Can process photos directly from remote servers
+- **SSH Support**: Can process photos directly from remote servers
+- **Remote Destination**: Can write reorganized photos back to remote server (NAS to NAS processing)
 - **Dry Run Mode**: Preview changes before applying them
 - **Comprehensive Statistics**: Tracks processed, skipped, and error files
 
@@ -104,12 +105,31 @@ docker-compose up
   -dry-run
 ```
 
+#### Remote to Remote (NAS to NAS)
+
+Process photos on NAS and write reorganized output back to NAS:
+
+```bash
+docker run --rm \
+  -v ~/.ssh:/root/.ssh:ro \
+  --add-host nas-photos:142.254.0.235 \
+  picture-metadata:latest \
+  -source "/var/services/homes/redgoat650/Photos/Jane Photos/Curated Photos" \
+  -dest "/var/services/homes/redgoat650/Photos/Organized" \
+  -ssh-host redgoat650@nas-photos:69 \
+  -remote-dest \
+  -verbose
+```
+
+This mode downloads each photo temporarily, updates EXIF metadata, then uploads to the destination path on the NAS.
 ### Command-Line Options
 
 - `-source <path>`: Source directory containing photos (required)
 - `-dest <path>`: Destination directory for reorganized photos (required)
 - `-dry-run`: Preview changes without actually moving/modifying files
-- `-ssh-host <host>`: SSH host for remote operations (e.g., `nas-photos` or `user@host:port`)
+- `-ssh-host <host>`: SSH host for source (e.g., `nas-photos` or `user@host:port`)
+- `-remote-dest`: Enable remote destination mode (writes back to NAS)
+- `-dest-ssh-host <host>`: SSH host for destination (defaults to same as source)
 - `-verbose`: Enable detailed logging
 
 ## How It Works

@@ -11,9 +11,10 @@ import (
 
 // PhotoProcessor handles the photo reorganization process
 type PhotoProcessor struct {
-	config    *Config
-	stats     *ProcessStats
-	sshClient *SSHClient
+	config        *Config
+	stats         *ProcessStats
+	sshClient     *SSHClient
+	destSSHClient *SSHClient
 }
 
 // ProcessStats tracks statistics during processing
@@ -42,14 +43,33 @@ func (p *PhotoProcessor) Process() error {
 		log.Println("Install exiftool: https://exiftool.org/")
 	}
 
-	// Initialize SSH client if needed
+	// Initialize SSH client for source if needed
 	if p.config.SSHHost != "" {
 		client, err := NewSSHClient(p.config.SSHHost)
 		if err != nil {
-			return fmt.Errorf("failed to create SSH client: %w", err)
+			return fmt.Errorf("failed to create SSH client for source: %w", err)
 		}
 		p.sshClient = client
 		defer p.sshClient.Close()
+	}
+
+	// Initialize SSH client for destination if needed
+	if p.config.RemoteDest {
+		if p.config.DestSSHHost == "" {
+			return fmt.Errorf("remote destination requires -dest-ssh-host or -ssh-host")
+		}
+
+		// If dest and source are on same host, reuse the connection
+		if p.config.DestSSHHost == p.config.SSHHost && p.sshClient != nil {
+			p.destSSHClient = p.sshClient
+		} else {
+			client, err := NewSSHClient(p.config.DestSSHHost)
+			if err != nil {
+				return fmt.Errorf("failed to create SSH client for destination: %w", err)
+			}
+			p.destSSHClient = client
+			defer p.destSSHClient.Close()
+		}
 	}
 
 	// Walk through source directory
@@ -213,33 +233,70 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 
 	// Generate standardized filename
 	newFilename := dateInfo.StandardizedFilename(desc, ext)
-	destPath := filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
+
+	var destPath string
+	if p.config.RemoteDest {
+		destPath = filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
+	} else {
+		destPath = filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
+	}
 
 	if p.config.DryRun {
-		log.Printf("[DRY RUN] Would download and move: %s -> %s", remotePath, destPath)
+		if p.config.RemoteDest {
+			log.Printf("[DRY RUN] Would process remote to remote: %s -> %s", remotePath, destPath)
+		} else {
+			log.Printf("[DRY RUN] Would download and move: %s -> %s", remotePath, destPath)
+		}
 		return nil
 	}
 
-	// Create destination directory
-	destDir := filepath.Dir(destPath)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", destDir, err)
+	// Download to temporary file
+	tempFile, err := os.CreateTemp("", "photo-*"+ext)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
+	tempPath := tempFile.Name()
+	tempFile.Close()
+	defer os.Remove(tempPath)
 
-	// Download file from remote
-	if err := p.sshClient.DownloadFile(remotePath, destPath); err != nil {
+	if err := p.sshClient.DownloadFile(remotePath, tempPath); err != nil {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
-	p.stats.MovedFiles++
 
 	// Update EXIF metadata
 	if checkExiftoolAvailable() {
-		if err := UpdateExifDate(destPath, dateInfo.ToTime()); err != nil {
-			log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
+		if err := UpdateExifDate(tempPath, dateInfo.ToTime()); err != nil {
+			log.Printf("Warning: failed to update EXIF for %s: %v", tempPath, err)
 		} else {
 			p.stats.UpdatedMetadata++
 		}
 	}
+
+	// Upload to destination (remote or local)
+	if p.config.RemoteDest {
+		// Create destination directory on remote
+		destDir := filepath.Dir(destPath)
+		if err := p.destSSHClient.CreateDirectory(destDir); err != nil {
+			return fmt.Errorf("failed to create remote directory %s: %w", destDir, err)
+		}
+
+		// Upload file to remote destination
+		if err := p.destSSHClient.UploadFile(tempPath, destPath); err != nil {
+			return fmt.Errorf("failed to upload file: %w", err)
+		}
+	} else {
+		// Copy to local destination
+		destDir := filepath.Dir(destPath)
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", destDir, err)
+		}
+
+		if err := copyFile(tempPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy file: %w", err)
+		}
+	}
+
+	p.stats.MovedFiles++
 
 	return nil
 }
