@@ -180,7 +180,16 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	// Generate standardized filename
 	newFilename := dateInfo.StandardizedFilename(desc, ext)
 	destPath := filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
-
+	// Check if destination already exists (for resume capability)
+	if p.config.SkipExisting {
+		if _, err := os.Stat(destPath); err == nil {
+			if p.config.Verbose {
+				log.Printf("Skipping (already exists): %s", destPath)
+			}
+			p.stats.SkippedFiles++
+			return nil
+		}
+	}
 	if p.config.DryRun {
 		log.Printf("[DRY RUN] Would move: %s -> %s", filePath, destPath)
 		return nil
@@ -239,6 +248,30 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 		destPath = filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
 	} else {
 		destPath = filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
+	}
+
+	// Check if destination already exists (for resume capability)
+	if p.config.SkipExisting {
+		var exists bool
+		var err error
+
+		if p.config.RemoteDest {
+			exists, err = p.destSSHClient.FileExists(destPath)
+			if err != nil {
+				log.Printf("Warning: failed to check if file exists at %s: %v", destPath, err)
+			}
+		} else {
+			_, err := os.Stat(destPath)
+			exists = err == nil
+		}
+
+		if exists {
+			if p.config.Verbose {
+				log.Printf("Skipping (already exists): %s", destPath)
+			}
+			p.stats.SkippedFiles++
+			return nil
+		}
 	}
 
 	if p.config.DryRun {

@@ -16,6 +16,7 @@ func main() {
 	destSSHHost := flag.String("dest-ssh-host", "", "SSH host for destination (defaults to same as source)")
 	remoteDest := flag.Bool("remote-dest", false, "Whether destination is on remote server (requires -dest-ssh-host or -ssh-host)")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
+	skipExisting := flag.Bool("skip-existing", false, "Skip files that already exist at destination (for resuming interrupted runs)")
 
 	flag.Parse()
 
@@ -31,13 +32,14 @@ func main() {
 	}
 
 	config := &Config{
-		SourceDir:   *sourceDir,
-		DestDir:     *destDir,
-		DryRun:      *dryRun,
-		SSHHost:     *sshHost,
-		DestSSHHost: *destSSHHost,
-		RemoteDest:  *remoteDest,
-		Verbose:     *verbose,
+		SourceDir:    *sourceDir,
+		DestDir:      *destDir,
+		DryRun:       *dryRun,
+		SSHHost:      *sshHost,
+		DestSSHHost:  *destSSHHost,
+		RemoteDest:   *remoteDest,
+		Verbose:      *verbose,
+		SkipExisting: *skipExisting,
 	}
 
 	if err := run(config); err != nil {

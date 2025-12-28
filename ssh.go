@@ -141,6 +141,24 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	return nil
 }
 
+// FileExists checks if a file exists on the remote server
+func (c *SSHClient) FileExists(remotePath string) (bool, error) {
+	cmd := fmt.Sprintf("test -f %s && echo exists || echo notfound", shellescape(remotePath))
+
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return false, fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	output, err := session.Output(cmd)
+	if err != nil {
+		return false, fmt.Errorf("failed to check file existence: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)) == "exists", nil
+}
+
 // CreateDirectory creates a directory on the remote server
 func (c *SSHClient) CreateDirectory(remotePath string) error {
 	cmd := fmt.Sprintf("mkdir -p %s", shellescape(remotePath))
