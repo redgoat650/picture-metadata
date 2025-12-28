@@ -17,6 +17,7 @@ func main() {
 	remoteDest := flag.Bool("remote-dest", false, "Whether destination is on remote server (requires -dest-ssh-host or -ssh-host)")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 	skipExisting := flag.Bool("skip-existing", false, "Skip files that already exist at destination (for resuming interrupted runs)")
+	workers := flag.Int("workers", 2, "Number of concurrent workers for parallel processing")
 
 	flag.Parse()
 
@@ -39,8 +40,7 @@ func main() {
 		DestSSHHost:  *destSSHHost,
 		RemoteDest:   *remoteDest,
 		Verbose:      *verbose,
-		SkipExisting: *skipExisting,
-	}
+		SkipExisting: *skipExisting, Workers: *workers}
 
 	if err := run(config); err != nil {
 		log.Fatalf("Error: %v", err)

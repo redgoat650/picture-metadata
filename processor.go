@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type PhotoProcessor struct {
 	destSSHClient *SSHClient
 	startTime     time.Time
 	lastProgress  time.Time
+	statsMutex    sync.Mutex
 }
 
 // ProcessStats tracks statistics during processing
@@ -131,16 +133,48 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d image files to process", p.stats.TotalFiles)
+	log.Printf("Found %d image files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
-	// Second pass: process files
-	for _, path := range imageFiles {
-		if err := p.processPhoto(path); err != nil {
-			log.Printf("Error processing %s: %v", path, err)
-			p.stats.ErrorFiles++
-		} else {
-			p.stats.ProcessedFiles++
+	// Second pass: process files with worker pool
+	jobs := make(chan string, len(imageFiles))
+	results := make(chan error, len(imageFiles))
+	var wg sync.WaitGroup
+
+	// Start workers
+	for w := 0; w < p.config.Workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				err := p.processPhoto(path)
+				results <- err
+			}
+		}()
+	}
+
+	// Send jobs
+	go func() {
+		for _, path := range imageFiles {
+			jobs <- path
 		}
+		close(jobs)
+	}()
+
+	// Collect results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Process results and update stats
+	for err := range results {
+		if err != nil {
+			p.statsMutex.Lock()
+			p.stats.ErrorFiles++
+			p.statsMutex.Unlock()
+		}
+		// Note: ProcessedFiles and SkippedFiles are incremented within
+		// the processing functions themselves, not here
 
 		// Print progress every 100 files or every 10 seconds
 		p.printProgress(false)
@@ -173,16 +207,48 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d image files to process", p.stats.TotalFiles)
+	log.Printf("Found %d image files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
-	// Second pass: process files
-	for _, path := range imageFiles {
-		if err := p.processRemotePhoto(path); err != nil {
-			log.Printf("Error processing %s: %v", path, err)
-			p.stats.ErrorFiles++
-		} else {
-			p.stats.ProcessedFiles++
+	// Second pass: process files with worker pool
+	jobs := make(chan string, len(imageFiles))
+	results := make(chan error, len(imageFiles))
+	var wg sync.WaitGroup
+
+	// Start workers
+	for w := 0; w < p.config.Workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				err := p.processRemotePhoto(path)
+				results <- err
+			}
+		}()
+	}
+
+	// Send jobs
+	go func() {
+		for _, path := range imageFiles {
+			jobs <- path
 		}
+		close(jobs)
+	}()
+
+	// Collect results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Process results and update stats
+	for err := range results {
+		if err != nil {
+			p.statsMutex.Lock()
+			p.stats.ErrorFiles++
+			p.statsMutex.Unlock()
+		}
+		// Note: ProcessedFiles and SkippedFiles are incremented within
+		// the processing functions themselves, not here
 
 		// Print progress every 100 files or every 10 seconds
 		p.printProgress(false)
@@ -200,10 +266,7 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	// Parse date from filename
 	dateInfo, err := ParseDateFromFilename(filePath)
 	if err != nil {
-		p.stats.SkippedFiles++
-		if p.config.Verbose {
-			log.Printf("No date found, copying to unknown: %s", filePath)
-		}
+		log.Printf("Skipping (no date found): %s -> unknown/", filePath)
 
 		// Copy to "unknown" folder instead of skipping
 		if !p.config.DryRun {
@@ -214,10 +277,25 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 				return fmt.Errorf("failed to create unknown directory: %w", err)
 			}
 
-			if err := copyFile(filePath, unknownPath); err != nil {
+			// Handle duplicate filenames by appending a counter
+			finalPath := unknownPath
+			counter := 1
+			ext := filepath.Ext(base)
+			nameWithoutExt := strings.TrimSuffix(base, ext)
+			for {
+				if _, err := os.Stat(finalPath); os.IsNotExist(err) {
+					break
+				}
+				finalPath = filepath.Join(p.config.DestDir, "unknown", fmt.Sprintf("%s_%d%s", nameWithoutExt, counter, ext))
+				counter++
+			}
+
+			if err := copyFile(filePath, finalPath); err != nil {
+				log.Printf("ERROR: Failed to copy to unknown: %s - %v", filePath, err)
 				return fmt.Errorf("failed to copy to unknown: %w", err)
 			}
 		}
+		p.stats.SkippedFiles++
 		return nil
 	}
 
@@ -265,6 +343,7 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 		}
 	}
 
+	p.stats.ProcessedFiles++
 	return nil
 }
 
@@ -277,20 +356,12 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 	// Parse date from filename
 	dateInfo, err := ParseDateFromFilename(remotePath)
 	if err != nil {
-		p.stats.SkippedFiles++
-		if p.config.Verbose {
-			log.Printf("No date found, copying to unknown: %s", remotePath)
-		}
+		log.Printf("Skipping (no date found): %s -> unknown/", remotePath)
 
 		// Copy to "unknown" folder instead of skipping
 		if !p.config.DryRun {
 			base := remotePath[strings.LastIndex(remotePath, "/")+1:]
-			var unknownPath string
-			if p.config.RemoteDest {
-				unknownPath = filepath.Join(p.config.DestDir, "unknown", base)
-			} else {
-				unknownPath = filepath.Join(p.config.DestDir, "unknown", base)
-			}
+			unknownPath := filepath.Join(p.config.DestDir, "unknown", base)
 
 			// Download to temporary file
 			tempFile, err := os.CreateTemp("", "photo-*"+filepath.Ext(remotePath))
@@ -302,26 +373,60 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 			defer os.Remove(tempPath)
 
 			if err := p.sshClient.DownloadFile(remotePath, tempPath); err != nil {
+				log.Printf("ERROR: Failed to download file: %s - %v", remotePath, err)
 				return fmt.Errorf("failed to download file: %w", err)
 			}
+
+			// Handle duplicate filenames by appending a counter
+			finalPath := unknownPath
+			counter := 1
+			ext := filepath.Ext(base)
+			nameWithoutExt := strings.TrimSuffix(base, ext)
 
 			// Upload or copy to unknown folder
 			if p.config.RemoteDest {
 				if err := p.destSSHClient.CreateDirectory(filepath.Join(p.config.DestDir, "unknown")); err != nil {
 					return fmt.Errorf("failed to create unknown directory: %w", err)
 				}
-				if err := p.destSSHClient.UploadFile(tempPath, unknownPath); err != nil {
+
+				// Check for duplicates and find available filename
+				for {
+					exists, err := p.destSSHClient.FileExists(finalPath)
+					if err != nil {
+						return fmt.Errorf("failed to check if file exists: %w", err)
+					}
+					if !exists {
+						break
+					}
+					finalPath = filepath.Join(p.config.DestDir, "unknown", fmt.Sprintf("%s_%d%s", nameWithoutExt, counter, ext))
+					counter++
+				}
+
+				if err := p.destSSHClient.UploadFile(tempPath, finalPath); err != nil {
+					log.Printf("ERROR: Failed to upload to unknown: %s - %v", finalPath, err)
 					return fmt.Errorf("failed to upload to unknown: %w", err)
 				}
 			} else {
 				if err := os.MkdirAll(filepath.Join(p.config.DestDir, "unknown"), 0755); err != nil {
 					return fmt.Errorf("failed to create unknown directory: %w", err)
 				}
-				if err := copyFile(tempPath, unknownPath); err != nil {
+
+				// Check for duplicates and find available filename
+				for {
+					if _, err := os.Stat(finalPath); os.IsNotExist(err) {
+						break
+					}
+					finalPath = filepath.Join(p.config.DestDir, "unknown", fmt.Sprintf("%s_%d%s", nameWithoutExt, counter, ext))
+					counter++
+				}
+
+				if err := copyFile(tempPath, finalPath); err != nil {
+					log.Printf("ERROR: Failed to copy to unknown: %s - %v", finalPath, err)
 					return fmt.Errorf("failed to copy to unknown: %w", err)
 				}
 			}
 		}
+		p.stats.SkippedFiles++
 		return nil
 	}
 
@@ -421,6 +526,7 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 
 	p.stats.MovedFiles++
 
+	p.stats.ProcessedFiles++
 	return nil
 }
 
@@ -461,6 +567,9 @@ func copyFile(src, dst string) error {
 
 // printProgress prints progress updates periodically
 func (p *PhotoProcessor) printProgress(force bool) {
+	p.statsMutex.Lock()
+	defer p.statsMutex.Unlock()
+
 	now := time.Now()
 	timeSinceLastProgress := now.Sub(p.lastProgress)
 	processed := p.stats.ProcessedFiles + p.stats.SkippedFiles + p.stats.ErrorFiles

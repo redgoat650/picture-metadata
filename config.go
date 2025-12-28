@@ -10,4 +10,5 @@ type Config struct {
 	Verbose      bool
 	RemoteDest   bool // Whether destination is on remote server
 	SkipExisting bool // Skip files that already exist at destination
+	Workers      int  // Number of concurrent workers
 }

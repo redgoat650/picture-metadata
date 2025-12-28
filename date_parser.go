@@ -24,6 +24,7 @@ type DateInfo struct {
 // - YYYY_MM_DD_description.jpg
 // - YYYY_description.jpg
 // - YYMMDD_description.jpg (for years 19XX or 20XX)
+// - YYMM_description.jpg (for years 19XX or 20XX, defaults to 1st of month)
 func ParseDateFromFilename(filename string) (*DateInfo, error) {
 	base := filepath.Base(filename)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
@@ -71,6 +72,25 @@ func ParseDateFromFilename(filename string) (*DateInfo, error) {
 				}
 
 				return &DateInfo{Year: year, Month: month, Day: day, Original: base}, nil
+			},
+		},
+		{
+			// YYMM format (4 consecutive digits followed by non-digit or end, assume 19XX or 20XX based on value)
+			regexp.MustCompile(`^(\d{2})(\d{2})(?:\D|$)`),
+			func(matches []string) (*DateInfo, error) {
+				yy, _ := strconv.Atoi(matches[1])
+				month, _ := strconv.Atoi(matches[2])
+
+				// Heuristic: if YY > 50, assume 19XX, else 20XX
+				var year int
+				if yy > 50 {
+					year = 1900 + yy
+				} else {
+					year = 2000 + yy
+				}
+
+				// Default to 1st of the month
+				return &DateInfo{Year: year, Month: month, Day: 1, Original: base}, nil
 			},
 		},
 		{
