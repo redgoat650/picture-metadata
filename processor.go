@@ -167,7 +167,21 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	if err != nil {
 		p.stats.SkippedFiles++
 		if p.config.Verbose {
-			log.Printf("Skipping %s: %v", filePath, err)
+			log.Printf("No date found, copying to unknown: %s", filePath)
+		}
+
+		// Copy to "unknown" folder instead of skipping
+		if !p.config.DryRun {
+			base := filepath.Base(filePath)
+			unknownPath := filepath.Join(p.config.DestDir, "unknown", base)
+
+			if err := os.MkdirAll(filepath.Join(p.config.DestDir, "unknown"), 0755); err != nil {
+				return fmt.Errorf("failed to create unknown directory: %w", err)
+			}
+
+			if err := copyFile(filePath, unknownPath); err != nil {
+				return fmt.Errorf("failed to copy to unknown: %w", err)
+			}
 		}
 		return nil
 	}
@@ -230,7 +244,48 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 	if err != nil {
 		p.stats.SkippedFiles++
 		if p.config.Verbose {
-			log.Printf("Skipping %s: %v", remotePath, err)
+			log.Printf("No date found, copying to unknown: %s", remotePath)
+		}
+
+		// Copy to "unknown" folder instead of skipping
+		if !p.config.DryRun {
+			base := remotePath[strings.LastIndex(remotePath, "/")+1:]
+			var unknownPath string
+			if p.config.RemoteDest {
+				unknownPath = filepath.Join(p.config.DestDir, "unknown", base)
+			} else {
+				unknownPath = filepath.Join(p.config.DestDir, "unknown", base)
+			}
+
+			// Download to temporary file
+			tempFile, err := os.CreateTemp("", "photo-*"+filepath.Ext(remotePath))
+			if err != nil {
+				return fmt.Errorf("failed to create temp file: %w", err)
+			}
+			tempPath := tempFile.Name()
+			tempFile.Close()
+			defer os.Remove(tempPath)
+
+			if err := p.sshClient.DownloadFile(remotePath, tempPath); err != nil {
+				return fmt.Errorf("failed to download file: %w", err)
+			}
+
+			// Upload or copy to unknown folder
+			if p.config.RemoteDest {
+				if err := p.destSSHClient.CreateDirectory(filepath.Join(p.config.DestDir, "unknown")); err != nil {
+					return fmt.Errorf("failed to create unknown directory: %w", err)
+				}
+				if err := p.destSSHClient.UploadFile(tempPath, unknownPath); err != nil {
+					return fmt.Errorf("failed to upload to unknown: %w", err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Join(p.config.DestDir, "unknown"), 0755); err != nil {
+					return fmt.Errorf("failed to create unknown directory: %w", err)
+				}
+				if err := copyFile(tempPath, unknownPath); err != nil {
+					return fmt.Errorf("failed to copy to unknown: %w", err)
+				}
+			}
 		}
 		return nil
 	}

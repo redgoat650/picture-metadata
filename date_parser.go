@@ -29,6 +29,7 @@ func ParseDateFromFilename(filename string) (*DateInfo, error) {
 	name := strings.TrimSuffix(base, filepath.Ext(base))
 
 	// Try various date patterns
+	// Order matters! Check more specific patterns first
 	patterns := []struct {
 		regex   *regexp.Regexp
 		extract func([]string) (*DateInfo, error)
@@ -44,8 +45,8 @@ func ParseDateFromFilename(filename string) (*DateInfo, error) {
 			},
 		},
 		{
-			// YYYYMMDD format
-			regexp.MustCompile(`^(\d{4})(\d{2})(\d{2})`),
+			// YYYYMMDD format (8 consecutive digits followed by non-digit or end)
+			regexp.MustCompile(`^(\d{4})(\d{2})(\d{2})(?:\D|$)`),
 			func(matches []string) (*DateInfo, error) {
 				year, _ := strconv.Atoi(matches[1])
 				month, _ := strconv.Atoi(matches[2])
@@ -54,8 +55,8 @@ func ParseDateFromFilename(filename string) (*DateInfo, error) {
 			},
 		},
 		{
-			// YYMMDD format (assume 19XX or 20XX based on value)
-			regexp.MustCompile(`^(\d{2})(\d{2})(\d{2})`),
+			// YYMMDD format (6 consecutive digits followed by non-digit or end, assume 19XX or 20XX based on value)
+			regexp.MustCompile(`^(\d{2})(\d{2})(\d{2})(?:\D|$)`),
 			func(matches []string) (*DateInfo, error) {
 				yy, _ := strconv.Atoi(matches[1])
 				month, _ := strconv.Atoi(matches[2])
@@ -87,6 +88,11 @@ func ParseDateFromFilename(filename string) (*DateInfo, error) {
 		if matches := pattern.regex.FindStringSubmatch(name); matches != nil {
 			info, err := pattern.extract(matches)
 			if err != nil {
+				continue
+			}
+
+			// Validate year range (reasonable for photos)
+			if info.Year < 1800 || info.Year > 2100 {
 				continue
 			}
 
