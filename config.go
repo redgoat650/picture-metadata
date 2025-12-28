@@ -8,7 +8,8 @@ type Config struct {
 	SSHHost      string
 	DestSSHHost  string // SSH host for destination (if different from source)
 	Verbose      bool
-	RemoteDest   bool // Whether destination is on remote server
-	SkipExisting bool // Skip files that already exist at destination
-	Workers      int  // Number of concurrent workers
+	RemoteDest   bool   // Whether destination is on remote server
+	SkipExisting bool   // Skip files that already exist at destination
+	Workers      int    // Number of concurrent workers
+	TestDir      string // Optional: specific subdirectory under SourceDir to process
 }

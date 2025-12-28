@@ -80,8 +80,16 @@ func (p *PhotoProcessor) Process() error {
 		}
 	}
 
+	// Determine the directory to process
+	processDir := p.config.SourceDir
+	if p.config.TestDir != "" {
+		// TestDir is relative to SourceDir
+		processDir = filepath.Join(p.config.SourceDir, p.config.TestDir)
+		log.Printf("Processing test directory: %s", processDir)
+	}
+
 	// Walk through source directory
-	err := p.walkDirectory(p.config.SourceDir)
+	err := p.walkDirectory(processDir)
 	if err != nil {
 		return fmt.Errorf("failed to process directory: %w", err)
 	}
@@ -304,6 +312,12 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	ext := filePath[strings.LastIndex(filePath, "."):]
 	desc := strings.TrimSuffix(base, ext)
 
+	// Extract directory context and prepend to description
+	dirContext := ExtractDirectoryContext(filePath, p.config.SourceDir)
+	if dirContext != "" {
+		desc = dirContext + "_" + desc
+	}
+
 	// Generate standardized filename
 	newFilename := dateInfo.StandardizedFilename(desc, ext)
 	destPath := filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
@@ -434,6 +448,12 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 	base := remotePath[strings.LastIndex(remotePath, "/")+1:]
 	ext := remotePath[strings.LastIndex(remotePath, "."):]
 	desc := strings.TrimSuffix(base, ext)
+
+	// Extract directory context and prepend to description
+	dirContext := ExtractDirectoryContext(remotePath, p.config.SourceDir)
+	if dirContext != "" {
+		desc = dirContext + "_" + desc
+	}
 
 	// Generate standardized filename
 	newFilename := dateInfo.StandardizedFilename(desc, ext)

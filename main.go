@@ -18,6 +18,7 @@ func main() {
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 	skipExisting := flag.Bool("skip-existing", false, "Skip files that already exist at destination (for resuming interrupted runs)")
 	workers := flag.Int("workers", 2, "Number of concurrent workers for parallel processing")
+	testDir := flag.String("test-dir", "", "Optional: specific subdirectory under -source to process (e.g., '2010-2019/2018/2018_10_21wedding official')")
 
 	flag.Parse()
 
@@ -40,7 +41,10 @@ func main() {
 		DestSSHHost:  *destSSHHost,
 		RemoteDest:   *remoteDest,
 		Verbose:      *verbose,
-		SkipExisting: *skipExisting, Workers: *workers}
+		SkipExisting: *skipExisting,
+		Workers:      *workers,
+		TestDir:      *testDir,
+	}
 
 	if err := run(config); err != nil {
 		log.Fatalf("Error: %v", err)
