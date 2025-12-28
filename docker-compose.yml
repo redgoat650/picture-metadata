@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  picture-metadata:
+    image: picture-metadata:latest
+    build: .
+    volumes:
+      # Mount SSH keys for remote access
+      - ~/.ssh:/root/.ssh:ro
+      # Mount output directory
+      - ./output:/data/output
+    command: >
+      -source "/var/services/homes/redgoat650/Photos/Jane Photos/Curated Photos"
+      -dest /data/output
+      -ssh-host nas-photos
+      -verbose
+      -dry-run
