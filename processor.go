@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // PhotoProcessor handles the photo reorganization process
@@ -15,6 +16,8 @@ type PhotoProcessor struct {
 	stats         *ProcessStats
 	sshClient     *SSHClient
 	destSSHClient *SSHClient
+	startTime     time.Time
+	lastProgress  time.Time
 }
 
 // ProcessStats tracks statistics during processing
@@ -37,6 +40,9 @@ func NewPhotoProcessor(config *Config) *PhotoProcessor {
 
 // Process runs the photo reorganization process
 func (p *PhotoProcessor) Process() error {
+	p.startTime = time.Now()
+	p.lastProgress = time.Now()
+
 	// Check if exiftool is available
 	if !checkExiftoolAvailable() {
 		log.Println("Warning: exiftool not found. EXIF metadata will not be updated.")
@@ -94,7 +100,9 @@ func (p *PhotoProcessor) walkDirectory(dir string) error {
 
 // walkLocalDirectory walks through local directories
 func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	// First pass: count total files
+	imageFiles := []string{}
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Printf("Error accessing %s: %v", path, err)
 			return nil
@@ -114,7 +122,19 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 			return nil
 		}
 
-		p.stats.TotalFiles++
+		imageFiles = append(imageFiles, path)
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	p.stats.TotalFiles = len(imageFiles)
+	log.Printf("Found %d image files to process", p.stats.TotalFiles)
+
+	// Second pass: process files
+	for _, path := range imageFiles {
 		if err := p.processPhoto(path); err != nil {
 			log.Printf("Error processing %s: %v", path, err)
 			p.stats.ErrorFiles++
@@ -122,8 +142,11 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 			p.stats.ProcessedFiles++
 		}
 
-		return nil
-	})
+		// Print progress every 100 files or every 10 seconds
+		p.printProgress(false)
+	}
+
+	return nil
 }
 
 // walkRemoteDirectory walks through remote SSH directories
@@ -133,6 +156,8 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 		return err
 	}
 
+	// First pass: count total files
+	imageFiles := []string{}
 	for _, path := range files {
 		// Skip @eaDir directories
 		if strings.Contains(path, "@eaDir") {
@@ -144,13 +169,23 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 			continue
 		}
 
-		p.stats.TotalFiles++
+		imageFiles = append(imageFiles, path)
+	}
+
+	p.stats.TotalFiles = len(imageFiles)
+	log.Printf("Found %d image files to process", p.stats.TotalFiles)
+
+	// Second pass: process files
+	for _, path := range imageFiles {
 		if err := p.processRemotePhoto(path); err != nil {
 			log.Printf("Error processing %s: %v", path, err)
 			p.stats.ErrorFiles++
 		} else {
 			p.stats.ProcessedFiles++
 		}
+
+		// Print progress every 100 files or every 10 seconds
+		p.printProgress(false)
 	}
 
 	return nil
@@ -422,6 +457,60 @@ func copyFile(src, dst string) error {
 
 	// Sync to ensure write is complete
 	return destFile.Sync()
+}
+
+// printProgress prints progress updates periodically
+func (p *PhotoProcessor) printProgress(force bool) {
+	now := time.Now()
+	timeSinceLastProgress := now.Sub(p.lastProgress)
+	processed := p.stats.ProcessedFiles + p.stats.SkippedFiles + p.stats.ErrorFiles
+
+	// Print every 100 files or every 10 seconds, whichever comes first
+	if !force && processed%100 != 0 && timeSinceLastProgress < 10*time.Second {
+		return
+	}
+
+	p.lastProgress = now
+	elapsed := now.Sub(p.startTime)
+
+	if processed == 0 {
+		return
+	}
+
+	// Calculate rate and ETA
+	rate := float64(processed) / elapsed.Seconds()
+	var eta string
+	if rate > 0 && p.stats.TotalFiles > processed {
+		remaining := p.stats.TotalFiles - processed
+		etaSeconds := float64(remaining) / rate
+		etaDuration := time.Duration(etaSeconds) * time.Second
+		eta = fmt.Sprintf(" | ETA: %s", formatDuration(etaDuration))
+	} else {
+		eta = ""
+	}
+
+	log.Printf("Progress: %d/%d files (%.1f%%) | Processed: %d | Skipped: %d | Errors: %d | Rate: %.1f files/sec | Elapsed: %s%s",
+		processed, p.stats.TotalFiles,
+		float64(processed)/float64(p.stats.TotalFiles)*100,
+		p.stats.ProcessedFiles, p.stats.SkippedFiles, p.stats.ErrorFiles,
+		rate, formatDuration(elapsed), eta)
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	} else if m > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 // printStats prints processing statistics
