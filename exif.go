@@ -82,3 +82,24 @@ func UpdateExifDate(filepath string, date time.Time) error {
 	// The actual implementation will shell out to exiftool
 	return updateExifWithExiftool(filepath, date)
 }
+
+// DetermineCorrectTimestamp decides which timestamp to use:
+// - If original EXIF has a timestamp and its year matches the parsed year, use original EXIF
+// - Otherwise, use the parsed date
+func DetermineCorrectTimestamp(sourcePath string, parsedDate *DateInfo) time.Time {
+	// Read original EXIF
+	exifData, err := ReadExifData(sourcePath)
+	if err != nil || exifData.DateTimeOriginal.IsZero() {
+		// No EXIF data, use parsed date
+		return parsedDate.ToTime()
+	}
+
+	// Check if years match
+	if exifData.DateTimeOriginal.Year() == parsedDate.Year {
+		// Years match, use the full original EXIF timestamp (preserves time-of-day)
+		return exifData.DateTimeOriginal
+	}
+
+	// Years don't match, trust the filename/path parsing
+	return parsedDate.ToTime()
+}

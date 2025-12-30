@@ -321,6 +321,40 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	// Generate standardized filename
 	newFilename := dateInfo.StandardizedFilename(desc, ext)
 	destPath := filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
+
+	// In fix-metadata mode, we only update EXIF, no copying
+	if p.config.FixMetadata {
+		// Check if destination file exists
+		if _, err := os.Stat(destPath); os.IsNotExist(err) {
+			if p.config.Verbose {
+				log.Printf("Skipping (dest doesn't exist): %s", destPath)
+			}
+			p.stats.SkippedFiles++
+			return nil
+		}
+
+		if p.config.DryRun {
+			log.Printf("[DRY RUN] Would fix metadata: %s", destPath)
+			return nil
+		}
+
+		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
+		correctTimestamp := DetermineCorrectTimestamp(filePath, dateInfo)
+
+		// Update EXIF metadata
+		if checkExiftoolAvailable() {
+			if err := UpdateExifDate(destPath, correctTimestamp); err != nil {
+				log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
+			} else {
+				p.stats.UpdatedMetadata++
+			}
+		}
+
+		p.stats.ProcessedFiles++
+		return nil
+	}
+
+	// Normal mode: copy file and update EXIF
 	// Check if destination already exists (for resume capability)
 	if p.config.SkipExisting {
 		if _, err := os.Stat(destPath); err == nil {
@@ -465,6 +499,93 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 		destPath = filepath.Join(p.config.DestDir, dateInfo.GetDirectoryPath(), newFilename)
 	}
 
+	// In fix-metadata mode, we only update EXIF, no copying
+	if p.config.FixMetadata {
+		// Check if destination file exists
+		var exists bool
+		var err error
+
+		if p.config.RemoteDest {
+			exists, err = p.destSSHClient.FileExists(destPath)
+			if err != nil {
+				log.Printf("Warning: failed to check if file exists at %s: %v", destPath, err)
+			}
+		} else {
+			_, err := os.Stat(destPath)
+			exists = err == nil
+		}
+
+		if !exists {
+			if p.config.Verbose {
+				log.Printf("Skipping (dest doesn't exist): %s", destPath)
+			}
+			p.stats.SkippedFiles++
+			return nil
+		}
+
+		if p.config.DryRun {
+			log.Printf("[DRY RUN] Would fix metadata: %s", destPath)
+			return nil
+		}
+
+		// Download source file temporarily to read EXIF
+		sourceTempFile, err := os.CreateTemp("", "photo-source-*"+ext)
+		if err != nil {
+			return fmt.Errorf("failed to create temp file for source: %w", err)
+		}
+		sourceTempPath := sourceTempFile.Name()
+		sourceTempFile.Close()
+		defer os.Remove(sourceTempPath)
+
+		if err := p.sshClient.DownloadFile(remotePath, sourceTempPath); err != nil {
+			return fmt.Errorf("failed to download source file: %w", err)
+		}
+
+		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
+		correctTimestamp := DetermineCorrectTimestamp(sourceTempPath, dateInfo)
+
+		// Update EXIF metadata at destination
+		if p.config.RemoteDest {
+			// Download dest file, update EXIF, re-upload
+			destTempFile, err := os.CreateTemp("", "photo-dest-*"+ext)
+			if err != nil {
+				return fmt.Errorf("failed to create temp file for dest: %w", err)
+			}
+			destTempPath := destTempFile.Name()
+			destTempFile.Close()
+			defer os.Remove(destTempPath)
+
+			if err := p.destSSHClient.DownloadFile(destPath, destTempPath); err != nil {
+				return fmt.Errorf("failed to download dest file: %w", err)
+			}
+
+			if checkExiftoolAvailable() {
+				if err := UpdateExifDate(destTempPath, correctTimestamp); err != nil {
+					log.Printf("Warning: failed to update EXIF for %s: %v", destTempPath, err)
+				} else {
+					// Re-upload to destination
+					if err := p.destSSHClient.UploadFile(destTempPath, destPath); err != nil {
+						return fmt.Errorf("failed to upload updated file: %w", err)
+					}
+					p.stats.UpdatedMetadata++
+				}
+			}
+		} else {
+			// Local destination, update directly
+			if checkExiftoolAvailable() {
+				if err := UpdateExifDate(destPath, correctTimestamp); err != nil {
+					log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
+				} else {
+					p.stats.UpdatedMetadata++
+				}
+			}
+		}
+
+		p.stats.ProcessedFiles++
+		return nil
+	}
+
+	// Normal mode: copy file and update EXIF
 	// Check if destination already exists (for resume capability)
 	if p.config.SkipExisting {
 		var exists bool

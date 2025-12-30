@@ -19,6 +19,7 @@ func main() {
 	skipExisting := flag.Bool("skip-existing", false, "Skip files that already exist at destination (for resuming interrupted runs)")
 	workers := flag.Int("workers", 2, "Number of concurrent workers for parallel processing")
 	testDir := flag.String("test-dir", "", "Optional: specific subdirectory under -source to process (e.g., '2010-2019/2018/2018_10_21wedding official')")
+	fixMetadata := flag.Bool("fix-metadata", false, "Fix metadata mode: restore original EXIF timestamps where appropriate instead of copying files")
 
 	flag.Parse()
 
@@ -44,6 +45,7 @@ func main() {
 		SkipExisting: *skipExisting,
 		Workers:      *workers,
 		TestDir:      *testDir,
+		FixMetadata:  *fixMetadata,
 	}
 
 	if err := run(config); err != nil {
