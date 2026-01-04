@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -110,4 +111,46 @@ func checkExiftoolAvailable() bool {
 	}
 
 	return false
+}
+
+// ReadTimestampWithExiftool reads timestamp from any media file (image or video) using exiftool
+// Returns the timestamp and true if found, or zero time and false if not found
+func ReadTimestampWithExiftool(filePath string) (time.Time, bool) {
+	// Check if exiftool is available
+	if _, err := exec.LookPath("exiftool"); err != nil {
+		return time.Time{}, false
+	}
+
+	// Use exiftool to read DateTimeOriginal, CreateDate, or MediaCreateDate
+	// Try DateTimeOriginal first (standard for photos)
+	cmd := exec.Command("exiftool", "-DateTimeOriginal", "-CreateDate", "-MediaCreateDate", "-s", "-s", "-s", filePath)
+	output, err := cmd.Output()
+	if err != nil || len(output) == 0 {
+		return time.Time{}, false
+	}
+
+	// Parse the first non-empty timestamp
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Try multiple timestamp formats
+		formats := []string{
+			"2006:01:02 15:04:05",
+			"2006:01:02 15:04:05-07:00",
+			"2006:01:02 15:04:05Z",
+			"2006-01-02T15:04:05",
+		}
+
+		for _, format := range formats {
+			if t, err := time.Parse(format, line); err == nil {
+				return t, true
+			}
+		}
+	}
+
+	return time.Time{}, false
 }

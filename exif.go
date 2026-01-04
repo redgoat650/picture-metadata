@@ -84,21 +84,34 @@ func UpdateExifDate(filepath string, date time.Time) error {
 }
 
 // DetermineCorrectTimestamp decides which timestamp to use:
-// - If original EXIF has a timestamp and its year matches the parsed year, use original EXIF
+// - If original EXIF/metadata has a timestamp and its year matches the parsed year, use original
 // - Otherwise, use the parsed date
 // Returns: (timestamp, isFromEXIF)
 func DetermineCorrectTimestamp(sourcePath string, parsedDate *DateInfo) (time.Time, bool) {
-	// Read original EXIF
-	exifData, err := ReadExifData(sourcePath)
-	if err != nil || exifData.DateTimeOriginal.IsZero() {
-		// No EXIF data, use parsed date
+	var originalTimestamp time.Time
+	var hasTimestamp bool
+
+	// Check if it's a video file - use exiftool for videos
+	if isVideoFile(sourcePath) {
+		originalTimestamp, hasTimestamp = ReadTimestampWithExiftool(sourcePath)
+	} else {
+		// For images, use the EXIF library first (faster)
+		exifData, err := ReadExifData(sourcePath)
+		if err == nil && !exifData.DateTimeOriginal.IsZero() {
+			originalTimestamp = exifData.DateTimeOriginal
+			hasTimestamp = true
+		}
+	}
+
+	if !hasTimestamp {
+		// No metadata, use parsed date
 		return parsedDate.ToTime(), false
 	}
 
 	// Check if years match
-	if exifData.DateTimeOriginal.Year() == parsedDate.Year {
-		// Years match, use the full original EXIF timestamp (preserves time-of-day)
-		return exifData.DateTimeOriginal, true
+	if originalTimestamp.Year() == parsedDate.Year {
+		// Years match, use the full original timestamp (preserves time-of-day)
+		return originalTimestamp, true
 	}
 
 	// Years don't match, trust the filename/path parsing
