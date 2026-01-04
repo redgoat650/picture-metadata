@@ -13,13 +13,15 @@ import (
 
 // PhotoProcessor handles the photo reorganization process
 type PhotoProcessor struct {
-	config        *Config
-	stats         *ProcessStats
-	sshClient     *SSHClient
-	destSSHClient *SSHClient
-	startTime     time.Time
-	lastProgress  time.Time
-	statsMutex    sync.Mutex
+	config         *Config
+	stats          *ProcessStats
+	sshClient      *SSHClient
+	destSSHClient  *SSHClient
+	startTime      time.Time
+	lastProgress   time.Time
+	statsMutex     sync.Mutex
+	timestampMap   map[string]time.Time // Tracks last timestamp used for each date (YYYY-MM-DD)
+	timestampMutex sync.Mutex           // Protects timestampMap for concurrent access
 }
 
 // ProcessStats tracks statistics during processing
@@ -35,8 +37,9 @@ type ProcessStats struct {
 // NewPhotoProcessor creates a new photo processor
 func NewPhotoProcessor(config *Config) *PhotoProcessor {
 	return &PhotoProcessor{
-		config: config,
-		stats:  &ProcessStats{},
+		config:       config,
+		stats:        &ProcessStats{},
+		timestampMap: make(map[string]time.Time),
 	}
 }
 
@@ -127,8 +130,8 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 			return nil
 		}
 
-		// Process only image files
-		if !isImageFile(path) {
+		// Process only media files (images and videos)
+		if !isMediaFile(path) {
 			return nil
 		}
 
@@ -141,7 +144,7 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d image files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
+	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
 	// Second pass: process files with worker pool
 	jobs := make(chan string, len(imageFiles))
@@ -206,8 +209,8 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 			continue
 		}
 
-		// Process only image files
-		if !isImageFile(path) {
+		// Process only media files (images and videos)
+		if !isMediaFile(path) {
 			continue
 		}
 
@@ -215,7 +218,7 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d image files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
+	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
 	// Second pass: process files with worker pool
 	jobs := make(chan string, len(imageFiles))
@@ -263,6 +266,38 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	}
 
 	return nil
+}
+
+// GetSequentialTimestamp allocates a sequential timestamp for files on the same date
+// to preserve lexicographic ordering in photo apps like iCloud Photos.
+// Only used for parsed dates (not real EXIF timestamps).
+func (p *PhotoProcessor) GetSequentialTimestamp(baseTimestamp time.Time) time.Time {
+	p.timestampMutex.Lock()
+	defer p.timestampMutex.Unlock()
+
+	// Use date as key (YYYY-MM-DD)
+	dateKey := baseTimestamp.Format("2006-01-02")
+
+	// Get last timestamp for this date
+	lastTimestamp, exists := p.timestampMap[dateKey]
+
+	var nextTimestamp time.Time
+	if !exists || lastTimestamp.Before(baseTimestamp) {
+		// First file for this date, or last timestamp is before base
+		nextTimestamp = baseTimestamp
+	} else {
+		// Increment by 1 second from last timestamp
+		nextTimestamp = lastTimestamp.Add(1 * time.Second)
+	}
+
+	// Store the new timestamp
+	p.timestampMap[dateKey] = nextTimestamp
+
+	if p.config.Verbose {
+		log.Printf("[Timestamp] Allocated %s for date %s", nextTimestamp.Format("2006-01-02 15:04:05"), dateKey)
+	}
+
+	return nextTimestamp
 }
 
 // processPhoto processes a single photo file
@@ -333,16 +368,25 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 			return nil
 		}
 
+		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
+		correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(filePath, dateInfo)
+
+		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
+		if !isFromEXIF {
+			correctTimestamp = p.GetSequentialTimestamp(correctTimestamp)
+		}
+
 		if p.config.DryRun {
-			log.Printf("[DRY RUN] Would fix metadata: %s", destPath)
+			source := "EXIF"
+			if !isFromEXIF {
+				source = "parsed+sequential"
+			}
+			log.Printf("[DRY RUN] Would fix metadata: %s -> %s (from %s)", destPath, correctTimestamp.Format("2006-01-02 15:04:05"), source)
 			return nil
 		}
 
-		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
-		correctTimestamp := DetermineCorrectTimestamp(filePath, dateInfo)
-
-		// Update EXIF metadata
-		if checkExiftoolAvailable() {
+		// Update EXIF metadata (only for images, not videos)
+		if !isVideoFile(destPath) && checkExiftoolAvailable() {
 			if err := UpdateExifDate(destPath, correctTimestamp); err != nil {
 				log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
 			} else {
@@ -382,9 +426,13 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	}
 	p.stats.MovedFiles++
 
-	// Update EXIF metadata
-	if checkExiftoolAvailable() {
-		if err := UpdateExifDate(destPath, dateInfo.ToTime()); err != nil {
+	// Determine correct timestamp for EXIF
+	// For new processing, we use parsed dates and apply sequential timestamps
+	timestamp := p.GetSequentialTimestamp(dateInfo.ToTime())
+
+	// Update EXIF metadata (only for images, not videos)
+	if !isVideoFile(destPath) && checkExiftoolAvailable() {
+		if err := UpdateExifDate(destPath, timestamp); err != nil {
 			log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
 		} else {
 			p.stats.UpdatedMetadata++
@@ -523,12 +571,7 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 			return nil
 		}
 
-		if p.config.DryRun {
-			log.Printf("[DRY RUN] Would fix metadata: %s", destPath)
-			return nil
-		}
-
-		// Download source file temporarily to read EXIF
+		// Download source file temporarily to read EXIF (need this even for dry-run to determine timestamp)
 		sourceTempFile, err := os.CreateTemp("", "photo-source-*"+ext)
 		if err != nil {
 			return fmt.Errorf("failed to create temp file for source: %w", err)
@@ -542,41 +585,65 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 		}
 
 		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
-		correctTimestamp := DetermineCorrectTimestamp(sourceTempPath, dateInfo)
+		correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(sourceTempPath, dateInfo)
 
-		// Update EXIF metadata at destination
-		if p.config.RemoteDest {
-			// Download dest file, update EXIF, re-upload
-			destTempFile, err := os.CreateTemp("", "photo-dest-*"+ext)
-			if err != nil {
-				return fmt.Errorf("failed to create temp file for dest: %w", err)
+		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
+		if !isFromEXIF {
+			correctTimestamp = p.GetSequentialTimestamp(correctTimestamp)
+		}
+
+		if p.config.DryRun {
+			source := "EXIF"
+			if !isFromEXIF {
+				source = "parsed+sequential"
 			}
-			destTempPath := destTempFile.Name()
-			destTempFile.Close()
-			defer os.Remove(destTempPath)
+			log.Printf("[DRY RUN] Would fix metadata: %s -> %s (from %s)", filepath.Base(destPath), correctTimestamp.Format("2006-01-02 15:04:05"), source)
+			return nil
+		}
 
-			if err := p.destSSHClient.DownloadFile(destPath, destTempPath); err != nil {
-				return fmt.Errorf("failed to download dest file: %w", err)
+		if p.config.Verbose {
+			source := "EXIF"
+			if !isFromEXIF {
+				source = "parsed+sequential"
 			}
+			log.Printf("[Timestamp] %s -> %s (from %s)", filepath.Base(destPath), correctTimestamp.Format("2006-01-02 15:04:05"), source)
+		}
 
-			if checkExiftoolAvailable() {
-				if err := UpdateExifDate(destTempPath, correctTimestamp); err != nil {
-					log.Printf("Warning: failed to update EXIF for %s: %v", destTempPath, err)
-				} else {
-					// Re-upload to destination
-					if err := p.destSSHClient.UploadFile(destTempPath, destPath); err != nil {
-						return fmt.Errorf("failed to upload updated file: %w", err)
-					}
-					p.stats.UpdatedMetadata++
+		// Update EXIF metadata at destination (only for images, not videos)
+		if !isVideoFile(destPath) {
+			if p.config.RemoteDest {
+				// Download dest file, update EXIF, re-upload
+				destTempFile, err := os.CreateTemp("", "photo-dest-*"+ext)
+				if err != nil {
+					return fmt.Errorf("failed to create temp file for dest: %w", err)
 				}
-			}
-		} else {
-			// Local destination, update directly
-			if checkExiftoolAvailable() {
-				if err := UpdateExifDate(destPath, correctTimestamp); err != nil {
-					log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
-				} else {
-					p.stats.UpdatedMetadata++
+				destTempPath := destTempFile.Name()
+				destTempFile.Close()
+				defer os.Remove(destTempPath)
+
+				if err := p.destSSHClient.DownloadFile(destPath, destTempPath); err != nil {
+					return fmt.Errorf("failed to download dest file: %w", err)
+				}
+
+				if checkExiftoolAvailable() {
+					if err := UpdateExifDate(destTempPath, correctTimestamp); err != nil {
+						log.Printf("Warning: failed to update EXIF for %s: %v", destTempPath, err)
+					} else {
+						// Re-upload to destination
+						if err := p.destSSHClient.UploadFile(destTempPath, destPath); err != nil {
+							return fmt.Errorf("failed to upload updated file: %w", err)
+						}
+						p.stats.UpdatedMetadata++
+					}
+				}
+			} else {
+				// Local destination, update directly
+				if checkExiftoolAvailable() {
+					if err := UpdateExifDate(destPath, correctTimestamp); err != nil {
+						log.Printf("Warning: failed to update EXIF for %s: %v", destPath, err)
+					} else {
+						p.stats.UpdatedMetadata++
+					}
 				}
 			}
 		}
@@ -632,9 +699,13 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
 
-	// Update EXIF metadata
-	if checkExiftoolAvailable() {
-		if err := UpdateExifDate(tempPath, dateInfo.ToTime()); err != nil {
+	// Determine correct timestamp for EXIF
+	// For new processing, we use parsed dates and apply sequential timestamps
+	timestamp := p.GetSequentialTimestamp(dateInfo.ToTime())
+
+	// Update EXIF metadata (only for images, not videos)
+	if !isVideoFile(tempPath) && checkExiftoolAvailable() {
+		if err := UpdateExifDate(tempPath, timestamp); err != nil {
 			log.Printf("Warning: failed to update EXIF for %s: %v", tempPath, err)
 		} else {
 			p.stats.UpdatedMetadata++
@@ -671,12 +742,29 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 	return nil
 }
 
-// isImageFile checks if a file is an image based on extension
-func isImageFile(filename string) bool {
+// isMediaFile checks if a file is a photo or video based on extension
+func isMediaFile(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
+	// Image extensions
 	imageExts := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
-	for _, imgExt := range imageExts {
-		if ext == imgExt {
+	// Video extensions
+	videoExts := []string{".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts"}
+
+	allExts := append(imageExts, videoExts...)
+	for _, mediaExt := range allExts {
+		if ext == mediaExt {
+			return true
+		}
+	}
+	return false
+}
+
+// isVideoFile checks if a file is a video based on extension
+func isVideoFile(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	videoExts := []string{".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts"}
+	for _, vidExt := range videoExts {
+		if ext == vidExt {
 			return true
 		}
 	}
