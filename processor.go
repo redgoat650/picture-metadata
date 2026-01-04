@@ -190,55 +190,22 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
+	log.Printf("Found %d media files to process", p.stats.TotalFiles)
 
 	// Sort files using natural sort to ensure correct numeric ordering
 	// (e.g., file1, file2, file10 instead of file1, file10, file2)
 	naturalSort(imageFiles)
 
-	// Pre-allocate timestamps for files to ensure correct ordering
-	p.preallocateTimestamps(imageFiles)
+	// Track last timestamp for sequential ordering
+	var lastTimestamp time.Time
 
-	// Second pass: process files with worker pool
-	jobs := make(chan string, len(imageFiles))
-	results := make(chan error, len(imageFiles))
-	var wg sync.WaitGroup
-
-	// Start workers
-	for w := 0; w < p.config.Workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for path := range jobs {
-				err := p.processPhoto(path)
-				results <- err
-			}
-		}()
-	}
-
-	// Send jobs
-	go func() {
-		for _, path := range imageFiles {
-			jobs <- path
-		}
-		close(jobs)
-	}()
-
-	// Collect results
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Process results and update stats
-	for err := range results {
+	// Process files sequentially in natural sort order
+	for _, path := range imageFiles {
+		err := p.processPhoto(path, &lastTimestamp)
 		if err != nil {
-			p.statsMutex.Lock()
 			p.stats.ErrorFiles++
-			p.statsMutex.Unlock()
+			log.Printf("Error processing %s: %v", path, err)
 		}
-		// Note: ProcessedFiles and SkippedFiles are incremented within
-		// the processing functions themselves, not here
 
 		// Print progress every 100 files or every 10 seconds
 		p.printProgress(false)
@@ -271,55 +238,22 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	}
 
 	p.stats.TotalFiles = len(imageFiles)
-	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
+	log.Printf("Found %d media files to process", p.stats.TotalFiles)
 
 	// Sort files using natural sort to ensure correct numeric ordering
 	// (e.g., file1, file2, file10 instead of file1, file10, file2)
 	naturalSort(imageFiles)
 
-	// Pre-allocate timestamps for files to ensure correct ordering
-	p.preallocateTimestamps(imageFiles)
+	// Track last timestamp for sequential ordering
+	var lastTimestamp time.Time
 
-	// Second pass: process files with worker pool
-	jobs := make(chan string, len(imageFiles))
-	results := make(chan error, len(imageFiles))
-	var wg sync.WaitGroup
-
-	// Start workers
-	for w := 0; w < p.config.Workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for path := range jobs {
-				err := p.processRemotePhoto(path)
-				results <- err
-			}
-		}()
-	}
-
-	// Send jobs
-	go func() {
-		for _, path := range imageFiles {
-			jobs <- path
-		}
-		close(jobs)
-	}()
-
-	// Collect results
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Process results and update stats
-	for err := range results {
+	// Process files sequentially in natural sort order
+	for _, path := range imageFiles {
+		err := p.processRemotePhoto(path, &lastTimestamp)
 		if err != nil {
-			p.statsMutex.Lock()
 			p.stats.ErrorFiles++
-			p.statsMutex.Unlock()
+			log.Printf("Error processing %s: %v", path, err)
 		}
-		// Note: ProcessedFiles and SkippedFiles are incremented within
-		// the processing functions themselves, not here
 
 		// Print progress every 100 files or every 10 seconds
 		p.printProgress(false)
@@ -328,103 +262,8 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	return nil
 }
 
-// preallocateTimestamps pre-allocates timestamps for all files in natural sort order
-// to ensure that concurrent processing maintains correct ordering.
-// Files with real EXIF keep their timestamps, files without EXIF get sequential
-// timestamps that maintain the natural sort order.
-func (p *PhotoProcessor) preallocateTimestamps(filePaths []string) {
-	var lastTimestamp time.Time
-
-	for _, filePath := range filePaths {
-		// Parse date from filename
-		dateInfo, err := ParseDateFromFilename(filePath)
-		if err != nil {
-			// Skip files without dates
-			continue
-		}
-
-		var correctTimestamp time.Time
-		var isFromEXIF bool
-
-		// Check if source file has real EXIF that matches the parsed year
-		// For remote files, we need to download temporarily
-		if p.sshClient != nil {
-			// Remote file - download temporarily to check EXIF
-			ext := filepath.Ext(filePath)
-			tempFile, err := os.CreateTemp("", "prealloc-*"+ext)
-			if err == nil {
-				tempPath := tempFile.Name()
-				tempFile.Close()
-				defer os.Remove(tempPath)
-
-				if err := p.sshClient.DownloadFile(filePath, tempPath); err == nil {
-					correctTimestamp, isFromEXIF = DetermineCorrectTimestamp(tempPath, dateInfo)
-				} else {
-					// Download failed, use parsed date
-					correctTimestamp = dateInfo.ToTime()
-					isFromEXIF = false
-				}
-			} else {
-				// Temp file creation failed, use parsed date
-				correctTimestamp = dateInfo.ToTime()
-				isFromEXIF = false
-			}
-		} else {
-			// Local file
-			correctTimestamp, isFromEXIF = DetermineCorrectTimestamp(filePath, dateInfo)
-		}
-
-		var finalTimestamp time.Time
-		if isFromEXIF {
-			// Real EXIF data is sacred - always use it as-is
-			finalTimestamp = correctTimestamp
-			// Update lastTimestamp to maintain sequential order for subsequent non-EXIF files
-			// Only if this EXIF timestamp is later than what we've seen
-			if correctTimestamp.After(lastTimestamp) {
-				lastTimestamp = correctTimestamp
-			}
-		} else {
-			// No matching EXIF - allocate sequential timestamp in natural filename order
-			// Start at midnight (00:00:00) so real EXIF timestamps (usually daytime) sort after
-			if lastTimestamp.IsZero() {
-				// First file without EXIF - start at midnight of the parsed date
-				baseDate := dateInfo.ToTime()
-				finalTimestamp = time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
-			} else {
-				// Subsequent files without EXIF - continue from last timestamp (whether it was EXIF or sequential)
-				finalTimestamp = lastTimestamp.Add(1 * time.Second)
-			}
-			lastTimestamp = finalTimestamp
-		}
-
-		// Store the pre-allocated timestamp
-		p.timestampAssignments[filePath] = finalTimestamp
-
-		if p.config.Verbose {
-			source := "EXIF"
-			if !isFromEXIF {
-				source = "parsed+sequential"
-			}
-			log.Printf("[Prealloc] %s -> %s (from %s)", filepath.Base(filePath), finalTimestamp.Format("2006-01-02 15:04:05"), source)
-		}
-	}
-}
-
-// GetSequentialTimestamp retrieves the pre-allocated timestamp for a file path
-// to preserve natural sort ordering in photo apps like iCloud Photos.
-func (p *PhotoProcessor) GetSequentialTimestamp(filePath string, baseTimestamp time.Time) time.Time {
-	// Check if we have a pre-allocated timestamp
-	if timestamp, exists := p.timestampAssignments[filePath]; exists {
-		return timestamp
-	}
-
-	// Fallback: use base timestamp (shouldn't happen in normal operation)
-	log.Printf("Warning: No pre-allocated timestamp for %s, using base timestamp", filePath)
-	return baseTimestamp
-}
-
 // processPhoto processes a single photo file
-func (p *PhotoProcessor) processPhoto(filePath string) error {
+func (p *PhotoProcessor) processPhoto(filePath string, lastTimestamp *time.Time) error {
 	if p.config.Verbose {
 		log.Printf("Processing: %s", filePath)
 	}
@@ -494,9 +333,24 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
 		correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(filePath, dateInfo)
 
-		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
-		if !isFromEXIF {
-			correctTimestamp = p.GetSequentialTimestamp(filePath, correctTimestamp)
+		// Calculate final timestamp using sequential logic
+		if isFromEXIF {
+			// Real EXIF data is sacred - use it as-is
+			// Update lastTimestamp only if EXIF is later than what we've seen
+			if correctTimestamp.After(*lastTimestamp) {
+				*lastTimestamp = correctTimestamp
+			}
+		} else {
+			// No matching EXIF - allocate sequential timestamp in natural filename order
+			if lastTimestamp.IsZero() {
+				// First file without EXIF - start at midnight of the parsed date
+				baseDate := dateInfo.ToTime()
+				correctTimestamp = time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
+			} else {
+				// Subsequent files without EXIF - continue from last timestamp
+				correctTimestamp = lastTimestamp.Add(1 * time.Second)
+			}
+			*lastTimestamp = correctTimestamp
 		}
 
 		if p.config.DryRun {
@@ -537,12 +391,27 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 	// Check if source has real EXIF that matches the parsed year
 	correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(filePath, dateInfo)
 
-	// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
+	// Calculate final timestamp using sequential logic
 	var timestamp time.Time
-	if !isFromEXIF {
-		timestamp = p.GetSequentialTimestamp(filePath, correctTimestamp)
-	} else {
+	if isFromEXIF {
+		// Real EXIF data is sacred - always use it as-is
 		timestamp = correctTimestamp
+		// Update lastTimestamp only if EXIF is later than what we've seen
+		if correctTimestamp.After(*lastTimestamp) {
+			*lastTimestamp = correctTimestamp
+		}
+	} else {
+		// No matching EXIF - allocate sequential timestamp in natural filename order
+		// Start at midnight (00:00:00) so real EXIF timestamps (usually daytime) sort after
+		if lastTimestamp.IsZero() {
+			// First file without EXIF - start at midnight of the parsed date
+			baseDate := dateInfo.ToTime()
+			timestamp = time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
+		} else {
+			// Subsequent files without EXIF - continue from last timestamp
+			timestamp = lastTimestamp.Add(1 * time.Second)
+		}
+		*lastTimestamp = timestamp
 	}
 
 	if p.config.DryRun {
@@ -580,7 +449,7 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 }
 
 // processRemotePhoto processes a photo from remote SSH location
-func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
+func (p *PhotoProcessor) processRemotePhoto(remotePath string, lastTimestamp *time.Time) error {
 	if p.config.Verbose {
 		log.Printf("Processing remote: %s", remotePath)
 	}
@@ -723,9 +592,24 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 		// Determine correct timestamp (original EXIF if year matches, otherwise parsed)
 		correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(sourceTempPath, dateInfo)
 
-		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
-		if !isFromEXIF {
-			correctTimestamp = p.GetSequentialTimestamp(remotePath, correctTimestamp)
+		// Calculate final timestamp using sequential logic
+		if isFromEXIF {
+			// Real EXIF data is sacred - use it as-is
+			// Update lastTimestamp only if EXIF is later than what we've seen
+			if correctTimestamp.After(*lastTimestamp) {
+				*lastTimestamp = correctTimestamp
+			}
+		} else {
+			// No matching EXIF - allocate sequential timestamp in natural filename order
+			if lastTimestamp.IsZero() {
+				// First file without EXIF - start at midnight of the parsed date
+				baseDate := dateInfo.ToTime()
+				correctTimestamp = time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
+			} else {
+				// Subsequent files without EXIF - continue from last timestamp
+				correctTimestamp = lastTimestamp.Add(1 * time.Second)
+			}
+			*lastTimestamp = correctTimestamp
 		}
 
 		if p.config.DryRun {
@@ -828,12 +712,27 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 	// Check if source has real EXIF that matches the parsed year
 	correctTimestamp, isFromEXIF := DetermineCorrectTimestamp(sourceTempPath, dateInfo)
 
-	// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
+	// Calculate final timestamp using sequential logic
 	var timestamp time.Time
-	if !isFromEXIF {
-		timestamp = p.GetSequentialTimestamp(remotePath, correctTimestamp)
-	} else {
+	if isFromEXIF {
+		// Real EXIF data is sacred - always use it as-is
 		timestamp = correctTimestamp
+		// Update lastTimestamp only if EXIF is later than what we've seen
+		if correctTimestamp.After(*lastTimestamp) {
+			*lastTimestamp = correctTimestamp
+		}
+	} else {
+		// No matching EXIF - allocate sequential timestamp in natural filename order
+		// Start at midnight (00:00:00) so real EXIF timestamps (usually daytime) sort after
+		if lastTimestamp.IsZero() {
+			// First file without EXIF - start at midnight of the parsed date
+			baseDate := dateInfo.ToTime()
+			timestamp = time.Date(baseDate.Year(), baseDate.Month(), baseDate.Day(), 0, 0, 0, 0, baseDate.Location())
+		} else {
+			// Subsequent files without EXIF - continue from last timestamp
+			timestamp = lastTimestamp.Add(1 * time.Second)
+		}
+		*lastTimestamp = timestamp
 	}
 
 	if p.config.DryRun {
