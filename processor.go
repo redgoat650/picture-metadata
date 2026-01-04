@@ -6,6 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,15 +16,16 @@ import (
 
 // PhotoProcessor handles the photo reorganization process
 type PhotoProcessor struct {
-	config         *Config
-	stats          *ProcessStats
-	sshClient      *SSHClient
-	destSSHClient  *SSHClient
-	startTime      time.Time
-	lastProgress   time.Time
-	statsMutex     sync.Mutex
-	timestampMap   map[string]time.Time // Tracks last timestamp used for each date (YYYY-MM-DD)
-	timestampMutex sync.Mutex           // Protects timestampMap for concurrent access
+	config               *Config
+	stats                *ProcessStats
+	sshClient            *SSHClient
+	destSSHClient        *SSHClient
+	startTime            time.Time
+	lastProgress         time.Time
+	statsMutex           sync.Mutex
+	timestampMap         map[string]time.Time // Tracks last timestamp used for each date (YYYY-MM-DD)
+	timestampMutex       sync.Mutex           // Protects timestampMap for concurrent access
+	timestampAssignments map[string]time.Time // Pre-allocated timestamps for each file path
 }
 
 // ProcessStats tracks statistics during processing
@@ -37,10 +41,52 @@ type ProcessStats struct {
 // NewPhotoProcessor creates a new photo processor
 func NewPhotoProcessor(config *Config) *PhotoProcessor {
 	return &PhotoProcessor{
-		config:       config,
-		stats:        &ProcessStats{},
-		timestampMap: make(map[string]time.Time),
+		config:               config,
+		stats:                &ProcessStats{},
+		timestampMap:         make(map[string]time.Time),
+		timestampAssignments: make(map[string]time.Time),
 	}
+}
+
+// naturalSort sorts strings using natural/alphanumeric ordering
+// where numbers are compared numerically rather than lexicographically
+// Example: file1, file2, file10, file20 (not file1, file10, file2, file20)
+func naturalSort(paths []string) {
+	sort.Slice(paths, func(i, j int) bool {
+		return naturalLess(paths[i], paths[j])
+	})
+}
+
+// naturalLess compares two strings using natural ordering
+func naturalLess(a, b string) bool {
+	// Regular expression to split on numeric sequences
+	re := regexp.MustCompile(`(\d+|\D+)`)
+	aParts := re.FindAllString(a, -1)
+	bParts := re.FindAllString(b, -1)
+
+	for idx := 0; idx < len(aParts) && idx < len(bParts); idx++ {
+		aPart := aParts[idx]
+		bPart := bParts[idx]
+
+		// Check if both parts are numeric
+		aNum, aIsNum := strconv.Atoi(aPart)
+		bNum, bIsNum := strconv.Atoi(bPart)
+
+		if aIsNum == nil && bIsNum == nil {
+			// Both are numbers - compare numerically
+			if aNum != bNum {
+				return aNum < bNum
+			}
+		} else {
+			// At least one is not a number - compare lexicographically
+			if aPart != bPart {
+				return aPart < bPart
+			}
+		}
+	}
+
+	// If all parts match, shorter string comes first
+	return len(aParts) < len(bParts)
 }
 
 // Process runs the photo reorganization process
@@ -146,6 +192,13 @@ func (p *PhotoProcessor) walkLocalDirectory(dir string) error {
 	p.stats.TotalFiles = len(imageFiles)
 	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
+	// Sort files using natural sort to ensure correct numeric ordering
+	// (e.g., file1, file2, file10 instead of file1, file10, file2)
+	naturalSort(imageFiles)
+
+	// Pre-allocate timestamps for files to ensure correct ordering
+	p.preallocateTimestamps(imageFiles)
+
 	// Second pass: process files with worker pool
 	jobs := make(chan string, len(imageFiles))
 	results := make(chan error, len(imageFiles))
@@ -220,6 +273,13 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	p.stats.TotalFiles = len(imageFiles)
 	log.Printf("Found %d media files to process with %d workers", p.stats.TotalFiles, p.config.Workers)
 
+	// Sort files using natural sort to ensure correct numeric ordering
+	// (e.g., file1, file2, file10 instead of file1, file10, file2)
+	naturalSort(imageFiles)
+
+	// Pre-allocate timestamps for files to ensure correct ordering
+	p.preallocateTimestamps(imageFiles)
+
 	// Second pass: process files with worker pool
 	jobs := make(chan string, len(imageFiles))
 	results := make(chan error, len(imageFiles))
@@ -268,10 +328,31 @@ func (p *PhotoProcessor) walkRemoteDirectory(dir string) error {
 	return nil
 }
 
-// GetSequentialTimestamp allocates a sequential timestamp for files on the same date
-// to preserve lexicographic ordering in photo apps like iCloud Photos.
-// Only used for parsed dates (not real EXIF timestamps).
-func (p *PhotoProcessor) GetSequentialTimestamp(baseTimestamp time.Time) time.Time {
+// preallocateTimestamps pre-allocates timestamps for all files in lexicographic order
+// to ensure that concurrent processing maintains correct ordering
+func (p *PhotoProcessor) preallocateTimestamps(filePaths []string) {
+	for _, filePath := range filePaths {
+		// Parse date from filename
+		dateInfo, err := ParseDateFromFilename(filePath)
+		if err != nil {
+			// Skip files without dates
+			continue
+		}
+
+		// Get base timestamp from parsed date
+		baseTimestamp := dateInfo.ToTime()
+
+		// Allocate sequential timestamp
+		timestamp := p.allocateSequentialTimestamp(baseTimestamp)
+
+		// Store the pre-allocated timestamp
+		p.timestampAssignments[filePath] = timestamp
+	}
+}
+
+// allocateSequentialTimestamp allocates a sequential timestamp for a given date
+// This is the internal method that actually increments timestamps
+func (p *PhotoProcessor) allocateSequentialTimestamp(baseTimestamp time.Time) time.Time {
 	p.timestampMutex.Lock()
 	defer p.timestampMutex.Unlock()
 
@@ -298,6 +379,20 @@ func (p *PhotoProcessor) GetSequentialTimestamp(baseTimestamp time.Time) time.Ti
 	}
 
 	return nextTimestamp
+}
+
+// GetSequentialTimestamp retrieves the pre-allocated timestamp for a file path
+// to preserve lexicographic ordering in photo apps like iCloud Photos.
+// Only used for parsed dates (not real EXIF timestamps).
+func (p *PhotoProcessor) GetSequentialTimestamp(filePath string, baseTimestamp time.Time) time.Time {
+	// Check if we have a pre-allocated timestamp
+	if timestamp, exists := p.timestampAssignments[filePath]; exists {
+		return timestamp
+	}
+
+	// Fallback: allocate on-the-fly (shouldn't happen in normal operation)
+	log.Printf("Warning: No pre-allocated timestamp for %s, allocating on-the-fly", filePath)
+	return p.allocateSequentialTimestamp(baseTimestamp)
 }
 
 // processPhoto processes a single photo file
@@ -373,7 +468,7 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 
 		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
 		if !isFromEXIF {
-			correctTimestamp = p.GetSequentialTimestamp(correctTimestamp)
+			correctTimestamp = p.GetSequentialTimestamp(filePath, correctTimestamp)
 		}
 
 		if p.config.DryRun {
@@ -428,7 +523,7 @@ func (p *PhotoProcessor) processPhoto(filePath string) error {
 
 	// Determine correct timestamp for EXIF
 	// For new processing, we use parsed dates and apply sequential timestamps
-	timestamp := p.GetSequentialTimestamp(dateInfo.ToTime())
+	timestamp := p.GetSequentialTimestamp(filePath, dateInfo.ToTime())
 
 	// Update EXIF metadata (only for images, not videos)
 	if !isVideoFile(destPath) && checkExiftoolAvailable() {
@@ -589,7 +684,7 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 
 		// If not from EXIF (i.e., parsed date), use sequential timestamps to preserve lexicographic order
 		if !isFromEXIF {
-			correctTimestamp = p.GetSequentialTimestamp(correctTimestamp)
+			correctTimestamp = p.GetSequentialTimestamp(remotePath, correctTimestamp)
 		}
 
 		if p.config.DryRun {
@@ -701,7 +796,7 @@ func (p *PhotoProcessor) processRemotePhoto(remotePath string) error {
 
 	// Determine correct timestamp for EXIF
 	// For new processing, we use parsed dates and apply sequential timestamps
-	timestamp := p.GetSequentialTimestamp(dateInfo.ToTime())
+	timestamp := p.GetSequentialTimestamp(remotePath, dateInfo.ToTime())
 
 	// Update EXIF metadata (only for images, not videos)
 	if !isVideoFile(tempPath) && checkExiftoolAvailable() {
